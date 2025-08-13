@@ -1,27 +1,84 @@
-// For open-source license, please refer to [License](https://github.com/HikariObfuscator/Hikari/wiki/License).
-#include "substrate.h"
-#include <llvm/Transforms/Obfuscation/Obfuscation.h>
+// For open-source license, please refer to
+// [License](https://github.com/HikariObfuscator/Hikari/wiki/License).
+#include "dobby.h"
+#include <dlfcn.h>
 #include <llvm/Config/abi-breaking.h>
-#include <string>
+#include <llvm/IR/PassManager.h>
+#include <llvm/Passes/PassBuilder.h>
+#include <llvm/Support/raw_ostream.h>
+#include <llvm/Transforms/Obfuscation/BogusControlFlow.h>
+#include <llvm/Transforms/Obfuscation/CryptoUtils.h>
+#include <llvm/Transforms/Obfuscation/Flattening.h>
+#include <llvm/Transforms/Obfuscation/IPObfuscationContext.h>
+#include <llvm/Transforms/Obfuscation/IndirectBranch.h>
+#include <llvm/Transforms/Obfuscation/IndirectCall.h>
+#include <llvm/Transforms/Obfuscation/IndirectGlobalVariable.h>
+#include <llvm/Transforms/Obfuscation/ObfuscationOptions.h>
+#include <llvm/Transforms/Obfuscation/SplitBasicBlock.h>
+#include <llvm/Transforms/Obfuscation/StringEncryption.h>
+#include <llvm/Transforms/Obfuscation/Substitution.h>
+#include <llvm/Transforms/Obfuscation/Utils.h>
+
 #include <mach-o/dyld.h>
-#if LLVM_ENABLE_ABI_BREAKING_CHECKS==1
+#include <string>
+
+#if LLVM_ENABLE_ABI_BREAKING_CHECKS == 1
 #error "Configure LLVM with -DLLVM_ABI_BREAKING_CHECKS=FORCE_OFF"
 #endif
-using namespace std;
-void (*old_pmb)(void* dis,legacy::PassManagerBase &MPM);
-Pass* (*old_get_LS)();
-extern "C" Pass* _ZN4llvm21createLowerSwitchPassEv(){
-  return old_get_LS();
+
+using namespace llvm;
+
+typedef void (*dobby_dummy_func_t)(void);
+
+/**
+ /// Register a callback for a default optimizer pipeline extension point
+ ///
+ /// This extension point allows adding optimizations at the very end of the
+ /// function optimization pipeline.
+ void registerOptimizerLastEPCallback(
+     const std::function<void(ModulePassManager &, OptimizationLevel)> &C) {
+   OptimizerLastEPCallbacks.push_back(C);
+ }
+  */
+
+// xcode16.2 llvmorg-17.0.5
+// PassBuilder::buildPerModuleDefaultPipeline
+// 替换目标函数 registerOptimizerLastEPCallback
+ModulePassManager (*targetFunction)(void *Level, bool LTOPreLink) = nullptr;
+
+static ModulePassManager hookFunction(void *Level, bool LTOPreLink)
+{
+  ModulePassManager MPM = targetFunction(Level, LTOPreLink);
+  MPM.addPass(createModuleToFunctionPassAdaptor(BogusControlFlowPass()));
+  return MPM;
 }
-static void new_pmb(void* dis,legacy::PassManagerBase &MPM){
-  MPM.add(createObfuscationPass());
-  old_pmb(dis,MPM);
-}
-static __attribute__((__constructor__)) void Inj3c73d(int argc, char* argv[]){
-  char* executablePath=argv[0];
-  //Initialize our own LLVM Library
-  MSImageRef exeImagemage=MSGetImageByName(executablePath);
-  errs()<<"Applying Apple Clang Hooks...\n";
-  MSHookFunction((void*)MSFindSymbol(exeImagemage,"__ZN4llvm18PassManagerBuilder25populateModulePassManagerERNS_6legacy15PassManagerBaseE"),(void*)new_pmb,(void**)&old_pmb);
-  old_get_LS=(Pass* (*)())MSFindSymbol(exeImagemage,"__ZN4llvm15callDefaultCtorIN12_GLOBAL__N_111LowerSwitchEEEPNS_4PassEv");
+
+static __attribute__((__constructor__)) void Inj3c73d(int argc, char *argv[])
+{
+  char *executablePath = argv[0];
+  // Initialize our own LLVM Library
+  if (strstr(executablePath, "swift-frontend"))
+    errs() << "Applying Apple SwiftC Hooks...\n";
+  else
+    errs() << "Applying Apple Clang Hooks...\n";
+
+  // 用于保存 DobbyHook 返回的原函数地址（void*）
+  void *targetFunctionPtr = nullptr;
+  // 使用 DobbyHook 进行 Hook，注意参数类型都用 void* 强转
+  void *symbolResolver = DobbySymbolResolver(
+      executablePath,
+      "__ZN4llvm11PassBuilder29buildPerModuleDefaultPipelineENS_"
+      "17OptimizationLevelEb");
+
+  int result = DobbyHook(symbolResolver, (void *)hookFunction, &targetFunctionPtr);
+
+  if (result != 0)
+  {
+    errs() << "DobbyHook failed!\n";
+    return;
+  }
+
+  // 将 void* 转换成正确的函数指针类型
+  targetFunction = reinterpret_cast<decltype(targetFunction)>(targetFunctionPtr);
+  errs() << "Hook buildPerModuleDefaultPipeline success\n";
 }

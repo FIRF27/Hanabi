@@ -5,17 +5,26 @@ add_library(LLVMHanabiDeps SHARED #This is for linking a minimum subset of LLVM 
 add_dependencies(LLVMHanabiDeps
   LLVMCore
   LLVMSupport
+  LLVMPasses
 )
+
+#set(CMAKE_INSTALL_RPATH "@loader_path/")
+#set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
+
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -frtti")
+
+
+
 add_library(LLVMHanabi SHARED
   ${CMAKE_CURRENT_LIST_DIR}/Loader.cpp
 )
-add_dependencies(LLVMHanabi
-  LLVMHanabiDeps
-  LLVMObfuscation
-)
-target_link_libraries(LLVMHanabi PRIVATE LLVMObfuscation ${CMAKE_CURRENT_LIST_DIR}/libsubstitute.dylib)
-target_link_options(LLVMHanabi PRIVATE -undefined PRIVATE dynamic_lookup PRIVATE -flat_namespace)
-target_compile_options(LLVMHanabi PRIVATE -Wno-dollar-in-identifier-extension PRIVATE -Wno-variadic-macros PRIVATE)
+add_dependencies(LLVMHanabi LLVMHanabiDeps LLVMObfuscation)
 
-target_link_libraries(LLVMHanabiDeps PRIVATE LLVMCore LLVMSupport ${CMAKE_CURRENT_LIST_DIR}/libsubstitute.dylib)
-target_link_options(LLVMHanabiDeps PRIVATE -undefined PRIVATE dynamic_lookup PRIVATE -all_load)
+
+
+target_link_libraries(LLVMHanabiDeps PRIVATE LLVMCore LLVMSupport LLVMPasses ${CMAKE_CURRENT_LIST_DIR}/libdobby.a)
+target_link_options(LLVMHanabiDeps PRIVATE -all_load -lobjc)
+
+target_link_libraries(LLVMHanabi PRIVATE LLVMObfuscation LLVMHanabiDeps)
+target_link_options(LLVMHanabi PRIVATE -flat_namespace)
+target_compile_options(LLVMHanabi PRIVATE -Wno-dollar-in-identifier-extension PRIVATE -Wno-variadic-macros PRIVATE)
