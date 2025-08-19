@@ -19,66 +19,72 @@
 #include <llvm/Transforms/Obfuscation/Substitution.h>
 #include <llvm/Transforms/Obfuscation/Utils.h>
 
+#include <iostream>
 #include <mach-o/dyld.h>
 #include <string>
-
 #if LLVM_ENABLE_ABI_BREAKING_CHECKS == 1
 #error "Configure LLVM with -DLLVM_ABI_BREAKING_CHECKS=FORCE_OFF"
 #endif
 
 using namespace llvm;
 
-typedef void (*dobby_dummy_func_t)(void);
+#pragma mark - SWIFT-FRONTEND
+ModulePassManager (*orig_perModuleDefaultPipeline)(OptimizationLevel Level,
+                                                   bool LTOPreLink) = nullptr;
+static ModulePassManager
+hook_perModuleDefaultPipeline(OptimizationLevel Level,
+                              bool LTOPreLink = false) {
+  std::cout << "Hook [perModuleDefaultPipeline]\n" << std::endl;
+  ModulePassManager MPM = orig_perModuleDefaultPipeline(Level, LTOPreLink);
+  // 先进行字符串加密
+  // 出现字符串加密基本块以后再进行基本块分割和其他混淆 加大解密难度
+  MPM.addPass(StringEncryptionPass(true));
+  // MPM.addPass(
+  //     createModuleToFunctionPassAdaptor(IndirectCallPass())); // 间接调用
+  // MPM.addPass(createModuleToFunctionPassAdaptor(
+  //     SplitBasicBlockPass())); // 优先进行基本块分割
+  MPM.addPass(createModuleToFunctionPassAdaptor(FlatteningPass())); //
+  //     对于控制流平坦化
+  // MPM.addPass(
+  //     createModuleToFunctionPassAdaptor(SubstitutionPass())); // 指令替换
+  MPM.addPass(
+      createModuleToFunctionPassAdaptor(BogusControlFlowPass())); // 虚假控制流
+  // MPM.addPass(IndirectBranchPass(true)); // 间接指令
+  // 理论上间接指令应该放在最后
+  //  MPM.addPass(IndirectGlobalVariablePass(true)); // 间接全局变量
+  // MPM.addPass(RewriteSymbolPass()); //
+  // 根据yaml信息 重命名特定symbols
 
-/**
- /// Register a callback for a default optimizer pipeline extension point
- ///
- /// This extension point allows adding optimizations at the very end of the
- /// function optimization pipeline.
- void registerOptimizerLastEPCallback(
-     const std::function<void(ModulePassManager &, OptimizationLevel)> &C) {
-   OptimizerLastEPCallbacks.push_back(C);
- }
-  */
-
-// xcode16.2 llvmorg-17.0.5
-// PassBuilder::buildPerModuleDefaultPipeline
-// 替换目标函数 registerOptimizerLastEPCallback
-ModulePassManager (*targetFunction)(void *Level, bool LTOPreLink) = nullptr;
-
-static ModulePassManager hookFunction(void *Level, bool LTOPreLink)
-{
-  ModulePassManager MPM = targetFunction(Level, LTOPreLink);
-  MPM.addPass(createModuleToFunctionPassAdaptor(BogusControlFlowPass()));
   return MPM;
 }
 
-static __attribute__((__constructor__)) void Inj3c73d(int argc, char *argv[])
-{
-  char *executablePath = argv[0];
-  // Initialize our own LLVM Library
-  if (strstr(executablePath, "swift-frontend"))
-    errs() << "Applying Apple SwiftC Hooks...\n";
-  else
-    errs() << "Applying Apple Clang Hooks...\n";
+#pragma mark - HOOK FUNCTION
 
-  // 用于保存 DobbyHook 返回的原函数地址（void*）
-  void *targetFunctionPtr = nullptr;
-  // 使用 DobbyHook 进行 Hook，注意参数类型都用 void* 强转
-  void *symbolResolver = DobbySymbolResolver(
-      executablePath,
-      "__ZN4llvm11PassBuilder29buildPerModuleDefaultPipelineENS_"
-      "17OptimizationLevelEb");
+void hookFunction(char *image_name) {
 
-  int result = DobbyHook(symbolResolver, (void *)hookFunction, &targetFunctionPtr);
+  void *orig_perModuleDefaultPipeline_ptr = nullptr;
+  void *symbol1 = DobbySymbolResolver(
+      image_name, "__ZN4llvm11PassBuilder29buildPerModuleDefaultPipelineENS_"
+                  "17OptimizationLevelEb");
 
-  if (result != 0)
-  {
-    errs() << "DobbyHook failed!\n";
-    return;
+  int result = DobbyHook(symbol1, (void *)hook_perModuleDefaultPipeline,
+                         &orig_perModuleDefaultPipeline_ptr);
+
+  if (result == 0) {
+    orig_perModuleDefaultPipeline =
+        reinterpret_cast<decltype(orig_perModuleDefaultPipeline)>(
+            orig_perModuleDefaultPipeline_ptr);
   }
+  std::cout << "Hook end! result=" << (result == 0 ? "success" : "failed")
+            << std::endl;
+}
 
-  // 将 void* 转换成正确的函数指针类型
-  targetFunction = reinterpret_cast<decltype(targetFunction)>(targetFunctionPtr);
-  errs() << "Hook buildPerModuleDefaultPipeline success\n";
+static __attribute__((__constructor__)) void Inj3c73d(int argc, char *argv[]) {
+  char *executablePath = argv[0];
+  if (strstr(executablePath, "swift-frontend")) {
+    std::cout << "Hooking Swift Frontend...\n";
+  } else {
+    std::cout << "Hooking Clang Frontend...\n";
+  }
+  hookFunction(executablePath);
 }
